@@ -1,0 +1,265 @@
+---
+title: "Machine Learning Course Project - Andy Pickering"
+output: html_notebook
+---
+
+## Executive Summary
+
+Accelerometer data from subjects performing barbell lifts is used to predict the manner in which they did the exercise. A machine learning model is used to make this prediction. The final model is a random forest model and has an out-of sample accuracy of 0.99 . This analysis is part of the JHU Machine Learning course on Coursera.
+
+
+## Project Description
+Using devices such as Jawbone Up, Nike FuelBand, and Fitbit it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## Data
+
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+The data for this project come from this source: http://groupware.les.inf.puc-rio.br/har. The citation for this dataset is: 
+
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+The goal of the project is to predict the manner in which they did the exercise. This is the "classe" variable in the training set. 
+
+
+First the data is downloaded and read into R:
+```{r Get data}
+rm(list=ls())
+
+url_train<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+
+url_test <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+# download data
+#download.file(url_train,"training_data")
+#download.file(url_test,"testing_data")
+
+# load data (already downloaded)
+train_data <- read.csv("training_data")
+test_data <- read.csv("testing_data")
+dim(train_data)
+
+```
+
+There are 19622 observations and 160 variables. The data is split into training/test sets based on the 'classe' variable we are trying to predict:
+```{r}
+suppressPackageStartupMessages(library(caret))
+inTrain <- createDataPartition(y=train_data$classe,p=0.75,list=FALSE)
+training_set <- train_data[inTrain,]
+testing_set <- train_data[-inTrain,]
+dim(training_set)
+dim(testing_set)
+```
+
+First I removed fields which I don't want to use to predict, including user names and timestamps.
+```{r}
+# remove fields we don't want to use for predicting
+
+idb <- which(names(train_data) %in% c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window","num_window" ) )
+training_set <- training_set[,-idb]
+dim(training_set)
+
+# remove same variables from testing_set also
+idb <- which(names(testing_set) %in% c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window","num_window" ) )
+testing_set <- testing_set[,-idb]
+dim(testing_set)
+
+# and from 'test_data' which we will predict for the quiz
+# remove same variables from testing_set also
+idb <- which(names(test_data) %in% c("X","user_name","raw_timestamp_part_1","raw_timestamp_part_2","cvtd_timestamp","new_window","num_window" ) )
+test_data <- test_data[,-idb]
+dim(test_data)
+
+```
+
+Since there are many variables, i'll check which ones have near-zero variance and remove those before attempting to fit any models. This reduces the number of variables to 98.
+```{r}
+# check which variables are zero/near-zero variance
+library(caret)
+bad_vars <- nearZeroVar(training_set)
+names(training_set)[bad_vars]
+
+# remove these data from the training set
+training_set_2 <- training_set[, -c(bad_vars)]
+
+# remove from test set also
+testing_set_2  <- testing_set [, -c(bad_vars)]
+dim(training_set_2)
+
+# and from test_data
+test_data  <- test_data [, -c(bad_vars)]
+dim(training_set_2)
+
+```
+
+
+Next I do some exploratory analysis of data and predictors
+```{r}
+
+# see if classes are balanced
+table(training_set_2$classe)
+
+# What percent is the dominant class?
+4185/nrow(training_set)*100
+
+```
+The dominant class is 'A', and it's fraction is about 28%. Thus, any model we construct should have an accuracy higher than this. 
+
+Next I look at how many NAs are in the data, and use knn-impute to deal with these.
+```{r}
+# Check if some variables have NAs
+nas<-lapply(training_set,is.na)
+sumna<-lapply(nas,sum)
+```
+
+Deal with NAs using knn-imputation prior to training
+```{r}
+
+pp<-preProcess(training_set_2,method="knnImpute")
+
+# apply to training values
+training_set_3 <- predict(pp,training_set_2)
+
+# apply to testing set also now, for future comparison after building models on training set
+testing_set_3 <- predict(pp, testing_set_2)
+
+# and test_data
+test_data <- predict(pp, test_data)
+```
+
+
+Before starting to train models, I make a training control to use for all models so we can easily compare them after. I will use 5-fold cross validation. The exact same folds are used for each model, so we can directly compare the results after and choose the best model.
+```{r}
+library(caret)
+myFolds <- createFolds(training_set_3$classe, k = 5)
+#myControl=trainControl(method="cv", number=5)
+myControl=trainControl(classProbs = TRUE, # IMPORTANT!
+                       verboseIter = FALSE,
+                       savePredictions = TRUE,
+                       index=myFolds)
+```
+
+### Summary of Data Preparation and Pre-processing
+- Data is partitioned into training and test sets, based on the 'classe' variable. 
+- Variables such as username and timestamps are removed since we don't want to use these to predict.
+- Variables with near-zero variance in training data are removed.
+- NAs are imputed using k-neareast-neighbors.
+- Above pre-processing steps are applied to the test data.
+
+## Model Training
+
+#### knn model
+
+```{r}
+
+library(caret)
+
+ptm <- proc.time()
+
+mod_knn <- train(classe~.,
+              method="knn",
+              data=training_set_3,
+              trControl=myControl)
+
+print(mod_knn)
+
+elaps_time <- proc.time() - ptm
+print(elaps_time/60)
+
+```
+
+#### rpart model
+
+```{r}
+
+library(caret)
+
+ptm <- proc.time()
+
+# rpart 
+mod_rpart <- train(classe~.,
+              method="rpart",
+              data=training_set_3,
+              trControl=myControl)
+print(mod_rpart)
+
+elaps_time <- proc.time() - ptm
+print(elaps_time/60)
+
+```
+
+
+#### Random forest model
+
+```{r}
+
+library(caret)
+
+# time how long it takes
+ptm <- proc.time()
+
+mod_rf <- train(classe~.,
+              method="rf",
+              data=training_set_3,
+              trControl=myControl)
+
+print(mod_rf)
+
+# print time to fit model
+elaps_time <- proc.time() - ptm
+print(elaps_time/60)
+
+```
+
+
+#### 'ranger' (another random forest package, which is supposed to run faster but give similar results)
+
+```{r}
+
+ptm <- proc.time()
+
+# RF, no pre-proc, omit NAs
+mod_ranger <- train(classe~.,
+              method="ranger",
+              data=training_set_3,
+              trControl=myControl)
+print(mod_ranger)
+
+elaps_time <- proc.time() - ptm
+print(elaps_time/60)
+
+```
+
+
+## Comparison of models. 
+The models are then directly compared to choose the best-performing one. I learned this procedure from the 'Machine Learning Toolbox' course on DataCamp.
+
+```{r}
+model_list <- list(item1 = mod_knn, item2=mod_rpart, item3 = mod_rf, item4 = mod_ranger)
+
+# Pass model_list to resamples(): resamples
+resamples <- resamples(model_list,modelNames=c("knn","rpart","rf","ranger"))
+
+# Summarize the results
+summary(resamples)
+bwplot(resamples,metric="Accuracy")
+
+```
+
+From the above comparison, the 'rf' random forest model had the highest training-set accuracy. This model is now evaluated on the testing set to estimate the out-of-sample accuracy.
+
+```{r}
+preds_final <- predict(mod_rf,testing_set_3)
+confusionMatrix(preds_final,testing_set_3$classe)
+```
+
+
+## Conclusions
+
+- Of the models tried, the two random forest models had the highest accuracy. The model fit with the "rf" package had a slightly higher accuracy than the "ranger" model, but took longer to run.
+- The "rf" model was chosen as the final model. On the training set, it had an accuracy of 0.95. On the test set, it had an accuracy of 0.99.
+
